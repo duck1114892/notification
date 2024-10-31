@@ -1,6 +1,7 @@
 const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const crypto = require("crypto");
 const {
   Novu,
   TemplateVariableTypeEnum,
@@ -9,27 +10,36 @@ const {
   StepTypeEnum,
 } = require("@novu/node");
 const webPush = require('web-push');
-
-// Tạo cặp VAPID keys
-
+require('dotenv').config(); // Load environment variables
 
 const app = express();
 const port = 8080;
 
 app.use(cors());
 app.use(bodyParser.json());
+
+// Khởi tạo VAPID keys
 const vapidKeys = webPush.generateVAPIDKeys();
 
 console.log('Public VAPID Key:', vapidKeys.publicKey);
 console.log('Private VAPID Key:', vapidKeys.privateKey);
 
-// Khởi tạo Novu với SECRET_KEY
-const novu = new Novu("f4d3c0c2ba028743b20e329ca292fc86");
+// Khởi tạo Novu với SECRET_KEY từ .env
+const novu = new Novu(process.env.NOVU_SECRET);
+const hmacSecret = process.env.HMAC_SECRET; // HMAC secret từ .env
+
 app.post('/api/webhook', async (req, res) => {
+  const signature = req.headers['x-novu-signature'];
+  const hmac = crypto.createHmac('sha256', hmacSecret).update(JSON.stringify(req.body)).digest('hex');
+
+  // Kiểm tra HMAC
+  if (signature !== hmac) {
+    return res.status(401).send('Invalid signature');
+  }
+
   const { target, title, content } = req.body; // Lấy dữ liệu từ webhook
   console.log('Received webhook:', req.body);
 
-  // Ở đây, bạn có thể gửi thông báo đến client bằng web-push
   const payload = JSON.stringify({
       title: title,
       content: content
@@ -37,7 +47,7 @@ app.post('/api/webhook', async (req, res) => {
 
   const options = {
       vapidDetails: {
-          subject: 'mailto:your-email@example.com',
+          subject: process.env.VAPID_SUBJECT,
           publicKey: vapidKeys.publicKey,
           privateKey: vapidKeys.privateKey,
       },
@@ -53,74 +63,20 @@ app.post('/api/webhook', async (req, res) => {
   res.status(200).send('Webhook processed');
 });
 
-// API endpoint để tạo workflow
-app.post("/api/workflow", async (req, res) => {
-  try {
-    const { data: workflowGroupsData } = await novu.notificationGroups.get();
-
-    // Create a new workflow
-    await novu.notificationTemplates.create({
-      name: 'Onboarding Workflow',
-      notificationGroupId: workflowGroupsData.data[0]._id,
-      steps: [
-        {
-          active: true,
-          shouldStopOnFail: false,
-          uuid: '78ab8c72-46de-49e4-8464-257085960f9e',
-          name: 'Chat',
-          filters: [
-            {
-              value: 'AND',
-              children: [
-                {
-                  field: '{{chatContent}}',
-                  value: 'flag',
-                  operator: 'NOT_IN',
-                  on: FilterPartTypeEnum.PAYLOAD,
-                },
-              ],
-            },
-          ],
-          template: {
-            type: StepTypeEnum.CHAT,
-            active: true,
-            subject: '',
-            variables: [
-              {
-                name: 'chatContent',
-                type: TemplateVariableTypeEnum.STRING,
-                required: true,
-              },
-            ],
-            content: '{{chatContent}}',
-            contentType: 'editor',
-          },
-        },
-      ],
-      description: 'Onboarding workflow to trigger after user sign up',
-      active: true,
-      draft: false,
-      critical: false,
-    });
-
-    res.status(201).json({ message: 'Workflow created successfully' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Đăng ký subscriber
-
-  app.post('/api/register-subscriber', async (req, res) => {
+app.post('/api/register-subscriber', async (req, res) => {
     const { subscriberId, deviceTokens } = req.body;
-    console.log(deviceTokens )
-  const data =  await novu.subscribers.setCredentials(
-      subscriberId,
-      PushProviderIdEnum.PushWebhook,
-      { deviceTokens: [deviceTokens] },
-      )
-    })
-
+    try {
+        const data = await novu.subscribers.setCredentials(
+            subscriberId,
+            PushProviderIdEnum.PushWebhook,
+            { deviceTokens: [deviceTokens] },
+        );
+        res.status(200).json({ message: 'Subscriber registered successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // Gửi thông báo
 app.post('/api/send-notification', async (req, res) => {
@@ -132,12 +88,12 @@ app.post('/api/send-notification', async (req, res) => {
       },
       payload: payload || {},
     });
-    console.log(response);
     res.status(200).json({ message: 'Notification sent', notificationId: response.id });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
 // Khởi động server
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
